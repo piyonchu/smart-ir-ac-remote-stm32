@@ -1,0 +1,6 @@
+../Core/Src/pv_st_f411.c:20:20:pv_clock_config	88	static
+../Core/Src/pv_st_f411.c:55:16:pv_get_uuid	4	static
+../Core/Src/pv_st_f411.c:59:16:pv_get_uuid_size	4	static
+../Core/Src/pv_st_f411.c:63:13:pv_board_init	4	static
+../Core/Src/pv_st_f411.c:81:6:pv_error_handler	8	static,ignoring_inline_asm
+../Core/Src/pv_st_f411.c:90:6:assert_failed	16	static
