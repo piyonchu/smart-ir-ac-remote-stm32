@@ -5,5 +5,5 @@
 
 USER_OBJS :=
 
-LIBS := -lpv_porcupine
+LIBS := -lpicovoice
 

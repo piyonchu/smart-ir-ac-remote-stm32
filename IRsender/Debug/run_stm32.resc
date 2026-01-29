@@ -1,0 +1,29 @@
+:name: STM32F4 Discovery UART2 Test
+:description: Runs an ELF on STM32F4 Discovery and shows UART2 output
+
+# 1. Define the variable for your ELF file
+# REPLACE 'testEMU.elf' with the actual path to your file
+$bin?=@micdebug.elf
+
+# 2. Create the machine
+mach create "stm32f4_disco"
+
+# 3. Load the standard STM32F4 Discovery platform
+# Renode includes this platform definition by default
+machine LoadPlatformDescription @platforms/boards/stm32f4_discovery.repl
+
+# 4. Open the UART2 Analyzer window
+# On the STM32F4 Discovery, UART2 is usually the main output
+showAnalyzer sysbus.usart2
+
+
+
+# 5. Load your binary
+sysbus LoadELF $bin
+# Enable ITM on the CPU
+machine EnableProfiler @itm_output.log
+
+
+sysbus LogPeripheralAccess sysbus.usart2
+# 6. Start the simulation
+start

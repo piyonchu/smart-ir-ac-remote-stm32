@@ -32,7 +32,7 @@
 #include "stm32f4xx_hal.h"
 
 // --- PORCUPINE INCLUDES ---
-#include "pv_porcupine_mcu.h"
+#include "pv_picovoice.h"
 #include "keyword_params.h" // Your Alexa/Keyword header
 /* USER CODE END Includes */
 
@@ -49,11 +49,6 @@ typedef struct {
     uint16_t space_us;
 } IR_Pulse_t;
 
-typedef enum {
-    CMD_NONE = 0,
-    CMD_WAKE_WORD_DETECTED,
-    CMD_UART_MSG_READY
-} AppCommand_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -63,7 +58,7 @@ typedef enum {
 #define FRAME_SIZE 512
 #define CHANNELS 2
 #define I2S_BUFFER_SIZE (FRAME_SIZE * CHANNELS * 2)
-#define MEMORY_BUFFER_SIZE (1024 * 20)
+#define MEMORY_BUFFER_SIZE (1024 * 43)
 
 // --- DAIKIN / HW CONFIG ---
 #define DHT11_PORT GPIOB
@@ -133,8 +128,14 @@ volatile uint8_t full_transfer_flag = 0;
 //static const char* ACCESS_KEY = "1tRtNkoHDZntOJsz9hWww1pEZ7Ox8nzMBa14btCoTyUTSTBFRxgd/A==";
 static const char* ACCESS_KEY = "cTKsua4o2+I4XCobOlBW3ujPKjrQAV8W6ZoyLiBfsdZgJbtYkuPqZQ==";
 static uint8_t memory_buffer[MEMORY_BUFFER_SIZE] __attribute__((aligned(16)));
-const float sensitivity = 0.7f;
-pv_porcupine_t *porcupine_handle = NULL;
+// Picovoice Objects
+pv_picovoice_t *picovoice_handle = NULL;
+
+// Parameters
+static const float PORCUPINE_SENSITIVITY = 0.75f;
+static const float RHINO_SENSITIVITY = 0.5f;
+static const float RHINO_ENDPOINT_DURATION_SEC = 0.5f;
+static const bool RHINO_REQUIRE_ENDPOINT = true;
 
 // --- AC / UART DATA ---
 uint8_t rx_buffer[1];
@@ -205,7 +206,130 @@ void DWT_Delay_us(volatile uint32_t microseconds);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+bool flagOn = 1;
 
+// Enum for Queue Commands
+enum {
+    CMD_NONE = 0,
+    CMD_WAKE_WORD_DETECTED,
+    CMD_UART_MSG_READY,
+    // Voice Commands
+    CMD_AC_ON, CMD_AC_OFF,
+    CMD_FAN_LOW, CMD_FAN_MED, CMD_FAN_HIGH,
+    CMD_MODE_COOL, CMD_MODE_DRY, CMD_MODE_FAN,
+    CMD_TEMP_WARMER, CMD_TEMP_COOLER,
+    CMD_SWING_ON, CMD_SWING_OFF
+};
+
+// Helper to find slot value in inference result
+const char* get_slot_value(pv_inference_t *inference, const char* slot_name) {
+    for (int i = 0; i < inference->num_slots; i++) {
+        if (strcmp(inference->slots[i], slot_name) == 0) {
+            return inference->values[i];
+        }
+    }
+    return NULL;
+}
+static void wake_word_callback(void) {
+    char uart_buf[64]; // Buffer for the message
+    int len;
+
+    // Visual feedback
+    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+
+    // Format and Send
+    len = sprintf(uart_buf, "[Wake Word Detected]\r\n");
+    HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+}
+
+static void inference_callback(pv_inference_t *inference) {
+    char uart_buf[256]; // Larger buffer for JSON data
+    int len;
+
+    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+
+    // 1. Open Bracket
+    len = sprintf(uart_buf, "{\r\n");
+    HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+
+    // 2. Is Understood
+    len = sprintf(uart_buf, "    is_understood : '%s',\r\n", (inference->is_understood ? "true" : "false"));
+    HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+
+    if (inference->is_understood) {
+        // 3. Intent
+        len = sprintf(uart_buf, "    intent : '%s',\r\n", inference->intent);
+        HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+
+        if (inference->num_slots > 0) {
+            // 4. Slots Header
+            len = sprintf(uart_buf, "    slots : {\r\n");
+            HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+
+            // 5. Iterate Slots
+            for (int32_t i = 0; i < inference->num_slots; i++) {
+                len = sprintf(uart_buf, "        '%s' : '%s',\r\n", inference->slots[i], inference->values[i]);
+                HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+            }
+
+            // 6. Close Slots
+            len = sprintf(uart_buf, "    }\r\n");
+            HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+        }
+    }
+
+    // 7. Close JSON
+    len = sprintf(uart_buf, "}\r\n\r\n");
+    HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+
+    uint8_t command_to_send = CMD_NONE;
+
+        if (inference->is_understood) {
+            if (strcmp(inference->intent, "changePower") == 0) {
+                const char* state = get_slot_value(inference, "ac_state");
+                if (state) {
+                    if (strcmp(state, "on") == 0) command_to_send = CMD_AC_ON;
+                    else if (strcmp(state, "off") == 0) command_to_send = CMD_AC_OFF;
+                }
+            }
+            else if (strcmp(inference->intent, "changeFan") == 0) {
+                const char* speed = get_slot_value(inference, "fan_speed");
+                if (speed) {
+                    if (strcmp(speed, "low") == 0) command_to_send = CMD_FAN_LOW;
+                    else if (strcmp(speed, "med") == 0) command_to_send = CMD_FAN_MED;
+                    else if (strcmp(speed, "high") == 0) command_to_send = CMD_FAN_HIGH;
+                }
+            }
+            else if (strcmp(inference->intent, "changeMode") == 0) {
+                const char* mode = get_slot_value(inference, "ac_mode");
+                if (mode) {
+                    if (strcmp(mode, "cool") == 0) command_to_send = CMD_MODE_COOL;
+                    else if (strcmp(mode, "dry") == 0) command_to_send = CMD_MODE_DRY;
+                    else if (strcmp(mode, "fan") == 0) command_to_send = CMD_MODE_FAN;
+                }
+            }
+            else if (strcmp(inference->intent, "changeTemp") == 0) {
+                const char* temp = get_slot_value(inference, "temperature");
+                if (temp) {
+                    if (strcmp(temp, "warmer") == 0) command_to_send = CMD_TEMP_WARMER;
+                    else if (strcmp(temp, "cooler") == 0) command_to_send = CMD_TEMP_COOLER;
+                }
+            }
+            else if (strcmp(inference->intent, "changeSwing") == 0) {
+                const char* state = get_slot_value(inference, "ac_state");
+                if (state) {
+                    if (strcmp(state, "on") == 0) command_to_send = CMD_SWING_ON;
+                    else if (strcmp(state, "off") == 0) command_to_send = CMD_SWING_OFF;
+                }
+            }
+        }
+
+        // Send the mapped command to the Control Task
+        if (command_to_send != CMD_NONE) {
+            osMessagePut(commandQueueHandle, command_to_send, 0);
+        }
+    pv_inference_delete(inference);
+}
 /* USER CODE END 0 */
 
 /**
@@ -247,6 +371,55 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   DWT_Delay_Init();
+
+
+  const int32_t lib_frame_len = pv_picovoice_frame_length();
+
+       char uart_buf[64]; // Buffer for UART messages
+       int len;
+
+       // Check if there is a mismatch at startup
+       if (lib_frame_len != FRAME_SIZE) {
+           len = sprintf(uart_buf, "CRITICAL WARNING: Lib wants %ld samples, but DMA is %d\r\n", lib_frame_len, FRAME_SIZE);
+           HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+           // If you see this warning, you MUST change #define FRAME_SIZE in main.h
+       } else {
+           len = sprintf(uart_buf, "Audio Task Started. Frame Len: %ld\r\n", lib_frame_len);
+           HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+       }
+
+
+       int32_t required_memory = 0;
+
+           // We use the existing 'memory_buffer' as the scratchpad (preliminary buffer)
+           pv_status_t mem_status = pv_picovoice_get_min_memory_buffer_size(
+               MEMORY_BUFFER_SIZE,      // 1. Preliminary Size (Your max buffer)
+               memory_buffer,           // 2. Preliminary Buffer Pointer
+               sizeof(KEYWORD_ARRAY),   // 3. Keyword Size
+               KEYWORD_ARRAY,           // 4. Keyword Model
+               sizeof(CONTEXT_ARRAY),   // 5. Context Size
+               CONTEXT_ARRAY,           // 6. Context Model
+               &required_memory         // 7. Output: The actual size needed
+           );
+
+           if (mem_status != PV_STATUS_SUCCESS) {
+               char err_buf[64];
+               int l = sprintf(err_buf, "PV Mem Check Fail: %s\r\n", pv_status_to_string(mem_status));
+               HAL_UART_Transmit(&huart2, (uint8_t*)err_buf, l, 100);
+               Error_Handler();
+           }
+
+           // Print the result to UART
+           char mem_msg[64];
+           int l = sprintf(mem_msg, "PV RAM Needed: %ld bytes\r\n", required_memory);
+           HAL_UART_Transmit(&huart2, (uint8_t*)mem_msg, l, 100);
+
+           // Verify we have enough space
+           if (required_memory > MEMORY_BUFFER_SIZE) {
+               char err_msg[] = "ERROR: MEMORY_BUFFER_SIZE too small!\r\n";
+               HAL_UART_Transmit(&huart2, (uint8_t*)err_msg, strlen(err_msg), 100);
+               Error_Handler();
+           }
   // 1. Initialize Manual Hardware (TIM3 & DWT)
 
 
@@ -290,20 +463,34 @@ int main(void)
 
         printf("\r\n============================\r\n");
 
-    // 3. Porcupine Init
-    const int32_t keyword_model_sizes = sizeof(KEYWORD_ARRAY);
-    const void *keyword_models = KEYWORD_ARRAY;
-    pv_status_t status = pv_porcupine_init(
-            ACCESS_KEY, MEMORY_BUFFER_SIZE, memory_buffer,
-            1, &keyword_model_sizes, &keyword_models,
-            &sensitivity, &porcupine_handle);
+        // 3. Picovoice Init (Replaces Porcupine Init)
+            pv_status_t status = pv_picovoice_init(
+                    ACCESS_KEY,
+                    MEMORY_BUFFER_SIZE,
+                    memory_buffer,
+                    sizeof(KEYWORD_ARRAY),
+                    KEYWORD_ARRAY,
+                    PORCUPINE_SENSITIVITY,
+                    wake_word_callback,
+                    sizeof(CONTEXT_ARRAY),
+                    CONTEXT_ARRAY,
+                    RHINO_SENSITIVITY,
+                    RHINO_ENDPOINT_DURATION_SEC,
+                    RHINO_REQUIRE_ENDPOINT,
+                    inference_callback,
+                    &picovoice_handle);
 
-    if (status != PV_STATUS_SUCCESS) {
-    	char err_msg[32];
-    	    // Print the specific status code (e.g., 6, 7, 1)
-    	    sprintf(err_msg, "PV_ERR: %d\r\n", status);
-    	    HAL_UART_Transmit(&huart2, (uint8_t*)err_msg, strlen(err_msg), 100);
-    }
+            if (status != PV_STATUS_SUCCESS) {
+                char err_msg[64];
+                sprintf(err_msg, "PV INIT FAIL: %s\r\n", pv_status_to_string(status));
+                HAL_UART_Transmit(&huart2, (uint8_t*)err_msg, strlen(err_msg), 100);
+                Error_Handler();
+            } else {
+                // Print Context Info for debugging
+                const char *rhino_context = NULL;
+                pv_picovoice_context_info(picovoice_handle, &rhino_context);
+                printf("Context: %s\r\n", rhino_context);
+            }
 
     // 4. Start Listening
     AC_UpdateState();
@@ -311,7 +498,7 @@ int main(void)
     HAL_UART_Receive_IT(&huart1, rx_buffer, 1);
     HAL_I2S_Receive_DMA(&hi2s2, i2s_rx_buffer, I2S_BUFFER_SIZE);
 
-//    // 5. Create RTOS Objects
+    // 5. Create RTOS Objects
 //    osMessageQDef(cmdQ, 5, uint8_t);
 //    commandQueueHandle = osMessageCreate(osMessageQ(cmdQ), NULL);
 //
@@ -354,7 +541,7 @@ int main(void)
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of AudioTask */
-  osThreadDef(AudioTask, StartAudioTask, osPriorityNormal, 0, 2048);
+  osThreadDef(AudioTask, StartAudioTask, osPriorityNormal, 0, 10240);
   AudioTaskHandle = osThreadCreate(osThread(AudioTask), NULL);
 
   /* definition and creation of ControlTask */
@@ -552,7 +739,7 @@ static void MX_TIM5_Init(void)
   htim5.Instance = TIM5;
   htim5.Init.Prescaler = 0;
   htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim5.Init.Period = 2210;
+  htim5.Init.Period = 1894;
   htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim5) != HAL_OK)
@@ -566,7 +753,7 @@ static void MX_TIM5_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1105;
+  sConfigOC.Pulse = 947;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim5, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
@@ -1015,37 +1202,46 @@ void StartDefaultTask(void const * argument)
 void StartAudioTask(void const * argument)
 {
   /* USER CODE BEGIN StartAudioTask */
-	while(1) {
-	        bool process = false;
-	        uint16_t* buffer_ptr = NULL;
+    // Helper buffer to make code cleaner
+    int16_t *src_buffer = NULL;
 
-	        if (half_transfer_flag) {
-	            half_transfer_flag = 0;
-	            buffer_ptr = &i2s_rx_buffer[0];
-	            process = true;
-	        } else if (full_transfer_flag) {
-	            full_transfer_flag = 0;
-	            buffer_ptr = &i2s_rx_buffer[I2S_BUFFER_SIZE / 2];
-	            process = true;
-	        }
 
-	        if (process && buffer_ptr) {
-	            for (int i = 0; i < FRAME_SIZE; i++) {
-	                mono_pcm_buffer[i] = (int16_t)buffer_ptr[i * 2];
-	            }
-	            int32_t keyword_index = -1;
-	            pv_status_t status = pv_porcupine_process(porcupine_handle, mono_pcm_buffer, &keyword_index);
 
-	            if (status == PV_STATUS_SUCCESS && keyword_index != -1) {
-	                // Wake Word Detected!
-	            	char msg[] = "\r\nWord Detected\r\n";
-	            	HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
-	                osMessagePut(commandQueueHandle, CMD_WAKE_WORD_DETECTED, 0);
-	                HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-	            }
-	        }
-	        osDelay(1);
-	    }
+    while(1) {
+        bool process = false;
+
+        // 1. Check DMA Flags
+        if (half_transfer_flag) {
+            half_transfer_flag = 0;
+            src_buffer = (int16_t *)&i2s_rx_buffer[0];
+            process = true;
+        } else if (full_transfer_flag) {
+            full_transfer_flag = 0;
+            src_buffer = (int16_t *)&i2s_rx_buffer[I2S_BUFFER_SIZE / 2];
+            process = true;
+        }
+
+        if (process && src_buffer) {
+            // 2. CRITICAL FIX: Convert Stereo (L/R) to Mono (L only)
+            for (int i = 0; i < FRAME_SIZE; i++) {
+                // Takes every 2nd sample.
+                mono_pcm_buffer[i] = src_buffer[i * 2];
+            }
+
+            // 3. Process with Picovoice (using the cleaned MONO buffer)
+            pv_status_t status = pv_picovoice_process(picovoice_handle, mono_pcm_buffer);
+
+            if (status != PV_STATUS_SUCCESS) {
+                // Optional: Print error only if it's not a standard "empty" frame
+            	char msg[] = "\r\nProcess Work failed\r\n";
+            	            	HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
+            } else {
+            	char msg[] = "\r\nProcess Working\r\n";
+            	HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
+            }
+        }
+        osDelay(1);
+    }
   /* USER CODE END StartAudioTask */
 }
 
@@ -1056,7 +1252,6 @@ void StartAudioTask(void const * argument)
 * @retval None
 */
 /* USER CODE END Header_StartControlTask */
-bool flagOn = 1;
 void StartControlTask(void const * argument)
 {
   /* USER CODE BEGIN StartControlTask */
@@ -1065,6 +1260,7 @@ void StartControlTask(void const * argument)
         evt = osMessageGet(commandQueueHandle, 200); // 200ms wait
         if (evt.status == osEventMessage) {
             uint8_t cmd = (uint8_t)evt.value.v;
+            uint8_t send_ir = 0;
             if (cmd == CMD_WAKE_WORD_DETECTED) {
             	if (flagOn) {
             		AC_SetPower(1);
@@ -1082,10 +1278,74 @@ void StartControlTask(void const * argument)
                 HAL_UART_Transmit(&huart2, (uint8_t*)tx_buffer, strlen(tx_buffer), 100);
                 HAL_UART_Transmit(&huart1, (uint8_t*)tx_buffer, strlen(tx_buffer), 100);
             }
+            else if (cmd == CMD_AC_ON) {
+                            AC_SetPower(1);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"power-on\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_AC_OFF) {
+                            AC_SetPower(0);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"power-off\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_FAN_LOW) {
+                            AC_SetFan(DAIKIN176_FAN_LOW);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"fan-low\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_FAN_MED) {
+                            AC_SetFan(DAIKIN176_FAN_MED);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"fan-med\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_FAN_HIGH) {
+                            AC_SetFan(DAIKIN176_FAN_HIGH);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"fan-high\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_MODE_COOL) {
+                            AC_SetMode(DAIKIN176_MODE_COOL);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"mode-cool\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_MODE_DRY) {
+                            AC_SetMode(DAIKIN176_MODE_DRY);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"mode-dry\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_MODE_FAN) {
+                            AC_SetMode(DAIKIN176_MODE_FAN);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"mode-fan\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_SWING_ON) {
+                            AC_SetSwing(1);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"swing-on\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_SWING_OFF) {
+                            AC_SetSwing(0);
+                            send_ir = 1;
+                            sprintf(tx_buffer, "{\"ac\":\"swing-off\",\"source\":\"voice\"}\r\n");
+                        }
+                        else if (cmd == CMD_TEMP_WARMER) {
+                            if (ac_temp < 32) {
+                                AC_SetTemp(ac_temp + 1);
+                                send_ir = 1;
+                                sprintf(tx_buffer, "{\"ac\":\"temp-up\",\"val\":%d,\"source\":\"voice\"}\r\n", ac_temp);
+                            }
+                        }
+                        else if (cmd == CMD_TEMP_COOLER) {
+                            if (ac_temp > 18) {
+                                AC_SetTemp(ac_temp - 1);
+                                send_ir = 1;
+                                sprintf(tx_buffer, "{\"ac\":\"temp-down\",\"val\":%d,\"source\":\"voice\"}\r\n", ac_temp);
+                            }
+                        }
             else if (cmd == CMD_UART_MSG_READY) {
                 for (int i = 0; msg_buffer[i]; i++) msg_buffer[i] = tolower((unsigned char)msg_buffer[i]);
 
-                uint8_t send_ir = 0;
+                //uint8_t send_ir = 0;
 
                 // Power commands
                 if (strstr(msg_buffer, "power-on")) {
@@ -1190,11 +1450,13 @@ void StartControlTask(void const * argument)
 
                 // Send IR command if needed
                 if (send_ir && !ir_busy) {
-                    AC_SendCommand();
-                }
+                                AC_SendCommand();
+                                HAL_UART_Transmit(&huart2, (uint8_t*)tx_buffer, strlen(tx_buffer), 100);
+                                HAL_UART_Transmit(&huart1, (uint8_t*)tx_buffer, strlen(tx_buffer), 100);
+                            }
 
-                HAL_UART_Transmit(&huart2, (uint8_t*)tx_buffer, strlen(tx_buffer), 100);
-                HAL_UART_Transmit(&huart1, (uint8_t*)tx_buffer, strlen(tx_buffer), 100);
+//                HAL_UART_Transmit(&huart2, (uint8_t*)tx_buffer, strlen(tx_buffer), 100);
+//                HAL_UART_Transmit(&huart1, (uint8_t*)tx_buffer, strlen(tx_buffer), 100);
 
 //                msg_ready = 0;
 //                msg_index = 0;
