@@ -18,8 +18,11 @@
 
 This project implements a **Smart Air Conditioner Controller** using the **STM32 Nucleo-F411RE** microcontroller. It upgrades legacy AC units by adding modern smart features, including **Infrared (IR) signal cloning**, **offline voice commands**, and **web-based remote control**.
 
-The system is engineered to perform complex audio processing and "Edge AI" tasks within strict hardware constraints (**512KB Flash** and **128KB SRAM**). By integrating an **ESP8266** for WiFi, the system also serves as an IoT node, allowing users to monitor room temperature and control the AC remotely via a real-time web dashboard.
+The system is engineered to perform complex audio processing and "Edge AI" tasks within strict hardware constraints (**512KB Flash** and **128KB SRAM**). By integrating an **ESP8266** for WiFi, the system also serves as an IoT node, allowing users to monitor room temperature and control the AC remotely via a real-time web dashboard.  
 
+![1](./img/1.png)
+
+![2](./img/2.png)
 ### 🛠 Hardware Specifications
 * **MCU:** STM32 Nucleo-F411RE (ARM Cortex-M4)
 * **Connectivity:** ESP8266 (WiFi Module)
@@ -37,6 +40,8 @@ The system replaces standard AC remotes by capturing, analyzing, and replaying r
 * **Reverse Engineering:** We decode these signals and hard-code the remote’s protocol into the STM32.
 * **Imitation:** We then program the STM32 to send signals that control the AC (power, temperature, fan speed) without the original remote.
 
+![2](./img/3.png)
+
 ### 2. Edge AI Wake-Word Recognition
 Optimized specifically for the STM32 architecture, this feature enables hands-free activation.
 * **Mel Spectrogram Processing:** Audio input is converted into Mel-frequency cepstral coefficients (MFCCs) to visualize sound features accurately.
@@ -44,17 +49,23 @@ Optimized specifically for the STM32 architecture, this feature enables hands-fr
 * **Efficient Matrix Operations:** This incremental approach is applied to both the spectrogram generation and the AI matrix calculations, significantly reducing CPU cycles.
 * **Powered by Picovoice:** Utilizes the Picovoice library for highly efficient computing.
 
+![2](./img/4.png)
+
 ### 3. Voice Command Intent Recognition
 Once the wake word is detected, the system processes natural language commands.
 * **Command Trees:** Spoken words are parsed into a decision tree structure (e.g., *[Wake Word] -> "Turn" -> "On" -> "The" -> "AC"*).
 * **Intent Execution:** The system identifies the user's intent from the sentence structure and triggers the corresponding IR signal.
 * **Powered by Picovoice:** Utilizes the Picovoice library for highly efficient computing.
+* 
+![2](./img/5.png)
 
 ### 4. IoT Web Dashboard & Telemetry
 A dedicated web interface provides remote control capabilities and environmental data visualization.
 * **Websocket Communication:** The website uses JavaScript and WebSockets to maintain a persistent, low-latency connection with the ESP8266.
 * **Real-Time Control:** Commands sent from the website are relayed to the STM32 to trigger IR transmission.
-* **Data Reporting:** The system reads the DHT11 sensor and pushes temperature data to the web dashboard, displaying historical trends on a graph.
+* **Data Reporting:** The system reads the DHT11 sensor and pushes temperature and humidity data to the web dashboard, displaying historical trends on a graph.
+
+![2](./img/6.png)
 
 ---
 
