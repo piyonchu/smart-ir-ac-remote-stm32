@@ -18,11 +18,16 @@
 
 This project implements a **Smart Air Conditioner Controller** using the **STM32 Nucleo-F411RE** microcontroller. It upgrades legacy AC units by adding modern smart features, including **Infrared (IR) signal cloning**, **offline voice commands**, and **web-based remote control**.
 
-The system is engineered to perform complex audio processing and "Edge AI" tasks within strict hardware constraints (**512KB Flash** and **128KB SRAM**). By integrating an **ESP8266** for WiFi, the system also serves as an IoT node, allowing users to monitor room temperature and control the AC remotely via a real-time web dashboard.  
-
 ![1](./img/1.png)
 
+The system is engineered to perform complex audio processing and "Edge AI" tasks within strict hardware constraints (**512KB Flash** and **128KB SRAM**). By integrating an **ESP8266** for WiFi, the system also serves as an IoT node, allowing users to monitor room temperature and control the AC remotely via a real-time web dashboard.  
+
 ![2](./img/2.png)
+
+![Image](./img/7.png)
+<p align="center"><sub>A user saying "a jawn yam" (wake word) followed by "turn the ac on".</sub></p>
+
+
 ### 🛠 Hardware Specifications
 * **MCU:** STM32 Nucleo-F411RE (ARM Cortex-M4)
 * **Connectivity:** ESP8266 (WiFi Module)
